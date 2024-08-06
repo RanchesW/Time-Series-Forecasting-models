@@ -100,7 +100,7 @@ Prophet(changepoint_prior_scale=0.1).
 
 ![newplot (1)](https://github.com/user-attachments/assets/a6df11c3-25fe-49d9-ad14-82240c2d8835)
 
-## 10. Результаты 
+## 10. Результаты необученной модели
 
 ![image](https://github.com/user-attachments/assets/92a08cea-61a2-4eca-a806-253cab10e65e)
 

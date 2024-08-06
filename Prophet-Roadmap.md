@@ -96,6 +96,10 @@ Prophet(changepoint_prior_scale=0.1).
 
 **Действие:** Используйте Matplotlib для построения графиков и сохраните график в файл изображения.
 
+## Визуальное понимание цели
+
+![newplot](https://github.com/user-attachments/assets/06a40d71-8a3e-4d9d-b1af-79bed28dee24)
+
 ## 10. Результаты 
 
 ![image](https://github.com/user-attachments/assets/92a08cea-61a2-4eca-a806-253cab10e65e)

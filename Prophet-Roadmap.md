@@ -98,7 +98,7 @@ Prophet(changepoint_prior_scale=0.1).
 
 ## Визуальное понимание цели
 
-![newplot (1)](https://github.com/user-attachments/assets/a6df11c3-25fe-49d9-ad14-82240c2d8835)
+![newplot (2)](https://github.com/user-attachments/assets/afecb745-3362-4572-bcd9-812fea24762f)
 
 ## 10. Результаты необученной модели
 

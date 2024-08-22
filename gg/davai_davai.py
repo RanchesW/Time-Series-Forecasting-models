@@ -34,9 +34,9 @@ def fetch_data_from_oracle(user, password, host, port, service_name, query):
     return df
 
 # Параметры подключения к Oracle
-user = 'alikhan'
-password = 'alikhan_123456'
-host = '10.10.120.97'
+user = ''
+password = ''
+host = ''
 port = 1521
 service_name = 'ORCL'
 

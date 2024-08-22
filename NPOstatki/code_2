@@ -1,0 +1,168 @@
+import os
+import pandas as pd
+import matplotlib.pyplot as plt
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import URL
+import cx_Oracle
+from prophet import Prophet
+from prophet.serialize import model_to_json, model_from_json
+
+# Настройка Oracle клиента
+oracle_client_path = r"C:\Users\aalik\Documents\instantclient_23_4"
+if not os.path.exists(oracle_client_path):
+    raise Exception(f"Oracle client path does not exist: {oracle_client_path}")
+
+os.environ["PATH"] = oracle_client_path + ";" + os.environ["PATH"]
+
+# Функция для подключения и извлечения данных из Oracle через SQLAlchemy
+def fetch_data_from_oracle(user, password, host, port, service_name, query):
+    dsn = URL.create(
+        "oracle+cx_oracle",
+        username=user,
+        password=password,
+        host=host,
+        port=port,
+        database=service_name,
+    )
+    engine = create_engine(dsn)
+    
+    # Выполнение запроса и получение данных
+    with engine.connect() as connection:
+        result = connection.execution_options(stream_results=True).execute(text(query))
+        df = pd.DataFrame(result.fetchall(), columns=result.keys())
+    
+    engine.dispose()
+    return df
+
+# Параметры подключения к Oracle
+user = 'alikhan'
+password = 'alikhan_123456'
+host = '10.10.120.97'
+port = 1521
+service_name = 'ORCL'
+
+# SQL-запрос для извлечения данных о реализации топлива
+query = """
+SELECT  rec.OBJECTCODE AS АЗС_Code,
+         item.prodname AS prodname, 
+         item.tanknum AS tanknum, 
+         TO_CHAR(rec.STARTTIMESTAMP, 'dd.mm.yy') AS ДАТА,
+         TO_CHAR(TO_NUMBER(TO_CHAR(rec.STARTTIMESTAMP, 'hh24')) + 1) AS HOUR,
+         SUM(item.Volume) AS КОЛИЧЕСТВО
+FROM BI.RECEIPTS rec
+RIGHT JOIN bi.ZREPORTS z 
+    ON (z.OBJECTCODE = rec.objectcode 
+        AND z.ZREPORTNUM = rec.znum 
+        AND z.STARTTIMESTAMP = rec.zSTARTTIMESTAMP 
+        AND EXTRACT(YEAR FROM z.STARTTIMESTAMP) IN (2022, 2023, 2024))
+LEFT JOIN BI.RECEIPTITEMS item 
+    ON item.RECEIPTID = rec.id
+WHERE rec.objectcode = 'Z313' 
+    AND ITEM.PRODTYPE = 0 
+    AND (item.BRUTO <> 0 OR (item.VOLUME <> 0 AND ITEM.PRODTYPE = 0 
+        AND rec.objectcode IN ('X347', 'X345', 'X343', 'X364', 'X344', 'X348', 'X342', 'X351', 'X349', 'X341', 'X346', 'X350')))
+GROUP BY rec.OBJECTCODE, 
+         item.prodname, 
+         item.tanknum, 
+         TO_CHAR(rec.STARTTIMESTAMP, 'dd.mm.yy'), 
+         TO_CHAR(TO_NUMBER(TO_CHAR(rec.STARTTIMESTAMP, 'hh24')) + 1)
+"""
+
+# Получение данных из Oracle
+df_oracle = fetch_data_from_oracle(user, password, host, port, service_name, query)
+
+# Удаляем возможные пробелы и другие скрытые символы в именах колонок
+df_oracle.columns = df_oracle.columns.str.strip()
+
+# Преобразуем дату и час в формат datetime и объединим их
+df_oracle['Дата и Время'] = pd.to_datetime(df_oracle['ДАТА'], format='%d.%m.%y') + pd.to_timedelta(df_oracle['hour'].astype(int), unit='h')
+
+# Устанавливаем временную метку как индекс
+df_oracle.set_index('Дата и Время', inplace=True)
+
+# Фильтрация данных за июль и август 2023 года
+df_oracle = df_oracle[(df_oracle.index >= '2023-07-01') & (df_oracle.index < '2023-09-01')]
+
+# Группировка данных по каждому часу и расчет среднего значения
+df_oracle = df_oracle.groupby([df_oracle.index.floor('H'), 'prodname']).agg({'КОЛИЧЕСТВО': 'mean'}).reset_index()
+
+# Загрузка данных о погоде (замените путь к файлам на актуальный)
+weather_july = pd.read_csv('weather_july_2023.csv')
+weather_august = pd.read_csv('weather_august_2023.csv')
+
+# Объединение данных за два месяца
+weather_data = pd.concat([weather_july, weather_august])
+
+# Преобразование столбца 'Date' в формат datetime
+weather_data['Date'] = pd.to_datetime(weather_data['Date'])
+
+# Переименование столбцов для соответствия в дальнейшем использовании
+weather_data.rename(columns={'Temperature (°C)': 'Temperature'}, inplace=True)
+
+# Добавление осадков на основе описания погоды
+weather_data['Precipitation'] = weather_data['Weather'].apply(lambda x: 1 if 'Rainy' in x else 0)
+
+# Преобразование погодных данных для соответствия временным меткам
+weather_data.set_index('Date', inplace=True)
+weather_data = weather_data.resample('H').ffill().reset_index()
+
+# Загрузка данных о праздничных днях в Казахстане
+holidays = ['2023-07-06', '2023-08-30']  # добавить актуальные праздничные дни
+df_oracle['holiday'] = df_oracle['Дата и Время'].dt.date.astype(str).isin(holidays).astype(int)
+
+# Объединение данных о погоде и реализации топлива
+df_oracle = pd.merge(df_oracle, weather_data, left_on='Дата и Время', right_on='Date', how='left')
+
+# Получаем список уникальных типов НП
+prod_types = df_oracle['prodname'].unique()
+
+# Визуализация и прогноз для каждого типа НП
+for prod in prod_types:
+    df_prod = df_oracle[df_oracle['prodname'] == prod].copy()
+
+    # Расчет текущего уровня топлива и мертвого остатка
+    last_date = df_prod['Дата и Время'].max().date()
+    current_fuel_level = df_prod[df_prod['Дата и Время'].dt.date == last_date]['КОЛИЧЕСТВО'].sum()
+    dead_stock_volume = df_prod['КОЛИЧЕСТВО'].min()
+
+    # Добавление скользящего среднего
+    df_prod['rolling_mean'] = df_prod['КОЛИЧЕСТВО'].rolling(window=24).mean()
+
+    # Гибридная модель: Prophet на скользящем среднем
+    df_prophet = df_prod[['Дата и Время', 'rolling_mean', 'Temperature', 'Precipitation', 'holiday']].dropna().rename(columns={'Дата и Время': 'ds', 'rolling_mean': 'y'})
+
+    # Инициализация модели Prophet
+    model = Prophet(
+        yearly_seasonality=True,
+        weekly_seasonality=True,
+        daily_seasonality=False
+    )
+    model.add_regressor('Temperature')
+    model.add_regressor('Precipitation')
+    model.add_regressor('holiday')
+
+    model.fit(df_prophet)
+
+    # Прогнозирование на 1 месяц вперед (август 2023 года)
+    future = model.make_future_dataframe(periods=24*31, freq='H')
+    future['Temperature'] = df_prophet['Temperature'].iloc[-1]
+    future['Precipitation'] = df_prophet['Precipitation'].iloc[-1]
+    future['holiday'] = 0  # Здесь можно добавить логику для добавления праздничных дней
+
+    forecast = model.predict(future)
+
+    # Фильтрация прогноза на август 2023 года
+    forecast_august = forecast[(forecast['ds'] >= '2023-08-01') & (forecast['ds'] < '2023-09-01')]
+
+    # Визуализация фактических данных, скользящего среднего и прогноза
+    plt.figure(figsize=(14, 7))
+    plt.plot(df_prod['Дата и Время'], df_prod['КОЛИЧЕСТВО'], label='Фактический объем (июль 2023)')
+    plt.plot(df_prod['Дата и Время'], df_prod['rolling_mean'], label='Скользящее среднее')
+    plt.plot(forecast_august['ds'], forecast_august['yhat'], label='Прогнозируемый объем (август 2023)')
+    plt.axhline(y=dead_stock_volume, color='r', linestyle='--', label='Мертвый остаток')
+    plt.axhline(y=current_fuel_level, color='g', linestyle='--', label='Текущий уровнемер')
+    plt.xlabel('Дата и время')
+    plt.ylabel('Объем')
+    plt.title(f'Гибридная модель: Прогноз и фактические данные для {prod}')
+    plt.legend()
+    plt.show()
